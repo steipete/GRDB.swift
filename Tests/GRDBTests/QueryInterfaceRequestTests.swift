@@ -978,4 +978,143 @@ class QueryInterfaceRequestTests: GRDBTestCase {
             }
         }
     }
+    
+    // MARK: - Free Table
+    
+    func testTable() throws {
+        try makeDatabaseQueue().write { db in
+            try db.create(table: "player") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("name", .text).notNull()
+            }
+            try db.execute(literal: """
+                INSERT INTO player (name) VALUES ('Arthur');
+                INSERT INTO player (name) VALUES ('Barbara');
+                """)
+            
+            struct Player: Decodable, FetchableRecord, Equatable {
+                var id: Int64
+                var name: String
+            }
+            
+            do {
+                let player = Table("player")
+                let request = player.all().orderByPrimaryKey().asRequest(of: Player.self)
+                let players = try request.fetchAll(db)
+                XCTAssertEqual(lastSQLQuery, #"SELECT * FROM "player" ORDER BY "id""#)
+                XCTAssertEqual(players, [
+                    Player(id: 1, name: "Arthur"),
+                    Player(id: 2, name: "Barbara"),
+                ])
+            }
+
+            do {
+                let player = Table<Player>("player")
+                let request = player.all().orderByPrimaryKey()
+                let players = try request.fetchAll(db)
+                XCTAssertEqual(lastSQLQuery, #"SELECT * FROM "player" ORDER BY "id""#)
+                XCTAssertEqual(players, [
+                    Player(id: 1, name: "Arthur"),
+                    Player(id: 2, name: "Barbara"),
+                ])
+            }
+            
+            do {
+                let players: [Player] = try Table("player").all()
+                    .orderByPrimaryKey()
+                    .fetchAll(db)
+                XCTAssertEqual(lastSQLQuery, #"SELECT * FROM "player" ORDER BY "id""#)
+                XCTAssertEqual(players, [
+                    Player(id: 1, name: "Arthur"),
+                    Player(id: 2, name: "Barbara"),
+                ])
+            }
+            
+            do {
+                let players = try Table("player").all()
+                    .orderByPrimaryKey()
+                    .asRequest(of: Player.self)
+                    .fetchAll(db)
+                XCTAssertEqual(lastSQLQuery, #"SELECT * FROM "player" ORDER BY "id""#)
+                XCTAssertEqual(players, [
+                    Player(id: 1, name: "Arthur"),
+                    Player(id: 2, name: "Barbara"),
+                ])
+            }
+
+            do {
+                let players = try Table<Player>("player").all()
+                    .orderByPrimaryKey()
+                    .fetchAll(db)
+                XCTAssertEqual(lastSQLQuery, #"SELECT * FROM "player" ORDER BY "id""#)
+                XCTAssertEqual(players, [
+                    Player(id: 1, name: "Arthur"),
+                    Player(id: 2, name: "Barbara"),
+                ])
+            }
+        }
+    }
+
+    func testTableAssociations() throws {
+        try makeDatabaseQueue().write { db in
+            try db.create(table: "parent") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("name", .text).notNull()
+            }
+            try db.create(table: "child") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("parentID", .integer).notNull().references("parent")
+                t.column("name", .text).notNull()
+            }
+            try db.execute(literal: """
+                INSERT INTO parent (name) VALUES ('parent1');
+                INSERT INTO parent (name) VALUES ('parent2');
+                INSERT INTO child (parentID, name) VALUES (1, 'child1');
+                INSERT INTO child (parentID, name) VALUES (1, 'child2');
+                INSERT INTO child (parentID, name) VALUES (2, 'child3');
+                """)
+            
+            struct Parent: Decodable, Equatable {
+                var id: Int64
+                var name: String
+            }
+            
+            struct Child: Decodable, Equatable {
+                var id: Int64
+                var parentID: Int64
+                var name: String
+            }
+            
+            struct ParentInfo: Decodable, FetchableRecord, Equatable {
+                var parent: Parent
+                var children: [Child]
+            }
+            
+            let parent = Table<Parent>("parent")
+            let child = Table<Child>("child")
+            let children = parent.hasMany(child)
+            
+            let request = parent.all()
+                .including(all: children.orderByPrimaryKey())
+                .orderByPrimaryKey()
+                .asRequest(of: ParentInfo.self)
+            let infos = try request.fetchAll(db)
+            XCTAssertEqual(Array(sqlQueries.filter { $0.starts(with: "SELECT") }.suffix(2)), [
+                            "SELECT * FROM \"parent\" ORDER BY \"id\"",
+                            "SELECT *, \"parentID\" AS \"grdb_parentID\" FROM \"child\" WHERE \"parentID\" IN (1, 2) ORDER BY \"id\""])
+            XCTAssertEqual(infos, [
+                ParentInfo(
+                    parent: Parent(id: 1, name: "parent1"),
+                    children: [
+                        Child(id: 1, parentID: 1, name: "child1"),
+                        Child(id: 2, parentID: 1, name: "child2"),
+                    ]),
+                ParentInfo(
+                    parent: Parent(id: 2, name: "parent2"),
+                    children: [
+                        Child(id: 3, parentID: 2, name: "child3"),
+                    ]),
+            ])
+        }
+    }
 }
